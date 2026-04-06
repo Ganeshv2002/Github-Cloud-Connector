@@ -24,8 +24,9 @@ A production-style ASP.NET Core 8 Web API that integrates with the GitHub REST A
 - .NET 8 / ASP.NET Core Web API
 - System.Text.Json
 - FluentValidation
-- Typed HttpClient
+- Typed HttpClient (`IHttpClientFactory`)
 - Swashbuckle (Swagger UI)
+- `IMemoryCache` (OAuth CSRF state protection)
 
 ---
 
@@ -35,6 +36,35 @@ A production-style ASP.NET Core 8 Web API that integrates with the GitHub REST A
 - A GitHub account
 - A GitHub Personal Access Token with `repo` scope for PAT authentication (optional if using OAuth)
 - A GitHub OAuth App registered for the OAuth 2.0 flow (optional if using PAT only)
+
+---
+
+## Quick Start
+
+The minimum steps to get the API running locally with PAT authentication:
+
+```powershell
+# 1. Clone the repository
+git clone https://github.com/your-username/github-cloud-connector.git
+cd "github-cloud-connector"
+
+# 2. Initialize user secrets (once per machine)
+dotnet user-secrets init
+
+# 3. Set required secrets
+dotnet user-secrets set "GitHub:Token" "ghp_your_github_pat_here"
+dotnet user-secrets set "Api:Key" "any-strong-secret-you-choose"
+
+# 4. Trust the HTTPS development certificate (once per machine)
+dotnet dev-certs https --trust
+
+# 5. Run
+dotnet run
+```
+
+Then open `https://localhost:5000/api/swagger` in your browser, click **Authorize**, enter your API key, and start calling endpoints.
+
+For GitHub OAuth 2.0 setup, see the [OAuth 2.0 Authentication](#oauth-20-authentication) section below.
 
 ---
 
@@ -51,8 +81,11 @@ The simplest way to authenticate. Provides a static token used for all GitHub AP
 **User Secrets (recommended)**
 
 ```powershell
+dotnet user-secrets init
 dotnet user-secrets set "GitHub:Token" "ghp_your_token_here"
 ```
+
+> Run `dotnet user-secrets init` only once per project. Skip it if you already have a `UserSecretsId` in the `.csproj`.
 
 **Environment Variable**
 
@@ -108,6 +141,8 @@ dotnet user-secrets set "Api:Key" "your-api-key-here"
 ```
 
 Choose any strong secret string. You will pass this as `Authorization: Bearer your-api-key-here` when calling the API directly, or enter it in the Swagger **Authorize** dialog.
+
+> The authentication handler also accepts a valid **GitHub OAuth access token** directly as the Bearer value. If the token does not match the configured API key, it is validated against the GitHub `/user` endpoint as a fallback. This means you can also use the OAuth flow and pass the resulting GitHub token directly to the API.
 
 ---
 
@@ -274,11 +309,14 @@ GET /api/github/commits/microsoft/vscode
     "message": "Fix terminal cursor regression",
     "authorName": "contributor",
     "authorEmail": "contributor@example.com",
-    "date": "2024-01-14T17:00:00Z",
+    "gitHubLogin": "contributor",
+    "committedAt": "2024-01-14T17:00:00Z",
     "htmlUrl": "https://github.com/microsoft/vscode/commit/a1b2c3d4e5f6"
   }
 ]
 ```
+
+`gitHubLogin` is the GitHub username of the committer and may be `null` for commits made outside of GitHub.
 
 ---
 
@@ -295,11 +333,12 @@ Create a pull request in a repository.
   "title": "Add new feature",
   "body": "Description of the changes.",
   "head": "feature-branch",
-  "base": "main"
+  "base": "main",
+  "draft": false
 }
 ```
 
-The `body` field is optional. All other fields are required. `head` is the branch with your changes; `base` is the branch you want to merge into.
+`body` and `draft` are optional. All other fields are required. `head` is the branch with your changes; `base` is the branch you want to merge into.
 
 **Response** `201 Created`
 
@@ -311,8 +350,13 @@ The `body` field is optional. All other fields are required. `head` is the branc
   "body": "Description of the changes.",
   "state": "open",
   "htmlUrl": "https://github.com/your-username/your-repo/pull/7",
-  "head": "feature-branch",
-  "base": "main"
+  "authorLogin": "your-username",
+  "headBranch": "feature-branch",
+  "baseBranch": "main",
+  "isDraft": false,
+  "isMerged": false,
+  "createdAt": "2024-01-14T17:00:00Z",
+  "updatedAt": "2024-01-14T17:00:00Z"
 }
 ```
 
@@ -414,6 +458,7 @@ All error responses follow a consistent structure:
 | 404    | The specified user, organization, or repository does not exist         |
 | 422    | GitHub rejected the issue payload (e.g., issues disabled on the repo)  |
 | 500    | Unexpected server-side failure                                         |
+| 502    | GitHub returned a non-success response during OAuth token exchange     |
 
 ---
 
@@ -423,11 +468,19 @@ All error responses follow a consistent structure:
 
 **Typed HttpClient** — `GitHubApiClient` is registered as a typed client via `IHttpClientFactory`. All HTTP configuration (base URL, auth header, versioning headers) is centralized in the registration. This keeps the client class clean and makes it straightforward to mock in tests.
 
-**Options pattern** — `GitHubOptions` binds `GitHub:Token` and `GitHub:BaseUrl` from configuration. Using `IOptions<GitHubOptions>` keeps credential access explicit and out of the application logic.
+**Options pattern** — `GitHubOptions` binds `GitHub:Token`, `GitHub:BaseUrl`, `GitHub:ClientId`, `GitHub:ClientSecret`, and `GitHub:RedirectUri` from configuration. `ApiOptions` binds `Api:Key` and `Api:BaseUrl`. Using `IOptions<T>` keeps credential access explicit and out of application logic.
+
+**DelegatingHandler for outbound auth** — `AuthorizationHandler` is an `HttpMessageHandler` that intercepts every outbound request to the GitHub API and injects the `Authorization: Bearer` header automatically. It checks the `ITokenStore` for an OAuth token first and falls back to the PAT. Neither the client nor the service needs to know how authentication works.
+
+**OAuth 2.0 Authorization Code flow** — `AuthController` implements the full GitHub OAuth flow: CSRF-protected redirect, code exchange (server-side, keeping `client_secret` out of the browser), and token storage. `InMemoryTokenStore` holds the live access token as a volatile field on a singleton. The Swagger `POST /api/auth/token` proxy endpoint is purpose-built so that Swagger's Authorize dialog can trigger the exchange without ever seeing the client secret.
+
+**CSRF protection** — A cryptographically random base64url `state` value is generated on `/api/auth/login` and stored in `IMemoryCache` with a 5-minute TTL. The callback validates this value before proceeding, preventing cross-site request forgery on the OAuth flow.
+
+**API key authentication with fallback** — `ApiKeyAuthenticationHandler` is a custom `AuthenticationHandler`. It first checks the Bearer token against the configured `Api:Key` using constant-time SHA-256 comparison (preventing timing attacks). If that fails, it validates the token against the GitHub `/user` endpoint via `IGitHubTokenValidator`, allowing a GitHub OAuth token to be used directly.
 
 **Global exception middleware** — `GlobalExceptionMiddleware` is a single catch-all that translates `GitHubApiException` to the correct HTTP status code and ensures internal details are never exposed in responses. Unexpected exceptions produce a 500 with a safe generic message.
 
-**FluentValidation** — Validation for `CreateIssueRequest` is defined in a dedicated validator class. The controller calls it explicitly, keeping validation decoupled from model annotations and controller logic.
+**FluentValidation** — `CreateIssueRequestValidator` and `CreatePullRequestRequestValidator` are registered from the assembly and injected into controllers explicitly. This keeps validation rules decoupled from model annotations and controller logic.
 
 **PR filtering** — The GitHub Issues API returns pull requests in its results. The service layer filters them out by checking for the presence of the `pull_request` field, so callers always receive genuine issues only.
 
