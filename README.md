@@ -1,15 +1,19 @@
 # GitHub Cloud Connector
 
-A production-style ASP.NET Core 8 Web API that integrates with the GitHub REST API using Personal Access Token authentication. Supports fetching repositories, listing issues, and creating issues across user accounts and organizations.
+A production-style ASP.NET Core 8 Web API that integrates with the GitHub REST API. Supports two authentication modes — Personal Access Token (PAT) and GitHub OAuth 2.0 Authorization Code flow. Covers repositories, issues, commits, and pull requests across user accounts and organizations.
 
 ---
 
 ## Features
 
-- Authenticate with GitHub using a PAT stored in configuration, never in source code
+- Authenticate with GitHub using a PAT stored in user secrets, never in source code
+- Authenticate interactively via GitHub OAuth 2.0 — authorize directly from the Swagger UI
 - Fetch repositories for a GitHub user or organization
 - List open issues for any repository (pull requests are automatically excluded)
 - Create a new issue in any repository you have write access to
+- List commits for any repository
+- Create pull requests
+- API-level Bearer token protection on all GitHub endpoints
 - Centralized error handling with accurate HTTP status codes
 - Clean layered architecture with typed HttpClient and the Options pattern
 
@@ -28,36 +32,84 @@ A production-style ASP.NET Core 8 Web API that integrates with the GitHub REST A
 ## Prerequisites
 
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
-- A GitHub Personal Access Token with `repo` scope (or `public_repo` for public repositories only)
+- A GitHub account
+- A GitHub Personal Access Token with `repo` scope for PAT authentication (optional if using OAuth)
+- A GitHub OAuth App registered for the OAuth 2.0 flow (optional if using PAT only)
 
 ---
 
 ## Configuration
 
-The API reads the GitHub token from `GitHub:Token` in configuration. The token must never be placed in `appsettings.json` or committed to source control.
+All secrets are stored outside of `appsettings.json` using .NET User Secrets or environment variables. Never commit tokens, client IDs, or client secrets to source control.
 
-### Option 1: .NET User Secrets (recommended for local development)
+---
 
-```bash
-cd "Github Cloud Connector"
-dotnet user-secrets init
+### PAT Authentication
+
+The simplest way to authenticate. Provides a static token used for all GitHub API calls.
+
+**User Secrets (recommended)**
+
+```powershell
 dotnet user-secrets set "GitHub:Token" "ghp_your_token_here"
 ```
 
-### Option 2: Environment Variable
+**Environment Variable**
 
-```bash
-# Linux / macOS
-export GitHub__Token="ghp_your_token_here"
-
+```powershell
 # Windows (PowerShell)
 $env:GitHub__Token = "ghp_your_token_here"
-
-# Windows (Command Prompt)
-set GitHub__Token=ghp_your_token_here
 ```
 
-Note the double underscore (`__`) when using environment variables to represent the `:` hierarchy separator.
+Note the double underscore (`__`) as the hierarchy separator when using environment variables.
+
+---
+
+### OAuth 2.0 Authentication
+
+Allows users to authorize the API through GitHub's login page. Credentials are obtained interactively and stored in memory for the session. The Swagger UI has an **Authorize** button wired to this flow.
+
+#### Step 1 — Register a GitHub OAuth App
+
+1. Go to [GitHub Settings > Developer settings > OAuth Apps](https://github.com/settings/developers)
+2. Click **New OAuth App**
+3. Fill in the fields:
+
+   | Field | Value |
+   |---|---|
+   | Application name | GitHub Cloud Connector (or any name) |
+   | Homepage URL | `https://localhost:5000` |
+   | Authorization callback URL | `https://localhost:5000/api/swagger/oauth2-redirect.html` |
+
+   > If you also want to use the direct `/api/auth/login` browser flow, add a second callback URL: `https://localhost:5000/api/auth/callback`. GitHub OAuth Apps support multiple callback URLs.
+
+4. Click **Register application**
+5. On the next page, note the **Client ID** and click **Generate a new client secret** to obtain the **Client Secret**
+
+#### Step 2 — Set the OAuth credentials via User Secrets
+
+```powershell
+dotnet user-secrets set "GitHub:ClientId" "your-client-id"
+dotnet user-secrets set "GitHub:ClientSecret" "your-client-secret"
+```
+
+#### Step 3 — Restart the application
+
+User secrets are read at startup. If the app is already running, stop it and run it again.
+
+---
+
+### API Key (Bearer token for endpoint protection)
+
+All `/api/github/*` endpoints require a Bearer token in the `Authorization` header. This is your own API key used to protect the gateway — not a GitHub credential. Set it via user secrets:
+
+```powershell
+dotnet user-secrets set "Api:Key" "your-api-key-here"
+```
+
+Choose any strong secret string. You will pass this as `Authorization: Bearer your-api-key-here` when calling the API directly, or enter it in the Swagger **Authorize** dialog.
+
+---
 
 ### appsettings.json (non-sensitive defaults only)
 
@@ -65,25 +117,38 @@ Note the double underscore (`__`) when using environment variables to represent 
 {
   "GitHub": {
     "BaseUrl": "https://api.github.com",
-    "Token": ""
+    "Token": "",
+    "ClientId": "",
+    "ClientSecret": "",
+    "RedirectUri": "https://localhost:5000/api/auth/callback"
+  },
+  "Api": {
+    "Key": "",
+    "BaseUrl": "https://localhost:5000"
   }
 }
 ```
 
-Do not put a real token here.
+Leave all secret fields empty here. They are populated at runtime via user secrets.
 
 ---
 
 ## Running Locally
 
-```bash
+```powershell
 dotnet run
 ```
 
-The API starts at `http://localhost:5000`. In Development mode, Swagger UI is available at:
+The API starts at `https://localhost:5000`. In Development mode, Swagger UI is available at:
 
 ```
-http://localhost:5000/swagger
+https://localhost:5000/api/swagger
+```
+
+If your browser shows a certificate warning on first launch, run the following once to trust the development certificate, then restart the browser:
+
+```powershell
+dotnet dev-certs https --trust
 ```
 
 ---
@@ -187,6 +252,147 @@ The `body` field is optional. All other fields are required.
   "htmlUrl": "https://github.com/your-username/your-repo/issues/42"
 }
 ```
+
+---
+
+### GET /api/github/commits/{owner}/{repo}
+
+List commits for a repository.
+
+**Request**
+
+```
+GET /api/github/commits/microsoft/vscode
+```
+
+**Response** `200 OK`
+
+```json
+[
+  {
+    "sha": "a1b2c3d4e5f6...",
+    "message": "Fix terminal cursor regression",
+    "authorName": "contributor",
+    "authorEmail": "contributor@example.com",
+    "date": "2024-01-14T17:00:00Z",
+    "htmlUrl": "https://github.com/microsoft/vscode/commit/a1b2c3d4e5f6"
+  }
+]
+```
+
+---
+
+### POST /api/github/pulls
+
+Create a pull request in a repository.
+
+**Request body**
+
+```json
+{
+  "owner": "your-username",
+  "repo": "your-repo",
+  "title": "Add new feature",
+  "body": "Description of the changes.",
+  "head": "feature-branch",
+  "base": "main"
+}
+```
+
+The `body` field is optional. All other fields are required. `head` is the branch with your changes; `base` is the branch you want to merge into.
+
+**Response** `201 Created`
+
+```json
+{
+  "id": 1234567890,
+  "number": 7,
+  "title": "Add new feature",
+  "body": "Description of the changes.",
+  "state": "open",
+  "htmlUrl": "https://github.com/your-username/your-repo/pull/7",
+  "head": "feature-branch",
+  "base": "main"
+}
+```
+
+---
+
+### GET /api/auth/login
+
+Redirects the browser to GitHub's OAuth authorization page. Use this for the interactive login flow outside of Swagger.
+
+---
+
+### GET /api/auth/callback
+
+GitHub redirects back here after the user authorizes the app. The authorization code is exchanged for an access token, which is stored in memory for the session. This endpoint is called automatically by GitHub — you do not call it directly.
+
+---
+
+### GET /api/auth/status
+
+Check whether the API is currently authenticated and by which method.
+
+**Response** `200 OK`
+
+```json
+{
+  "message": "Authenticated via OAuth.",
+  "scope": "repo"
+}
+```
+
+---
+
+## Testing with Swagger UI
+
+The API ships with Swagger UI at `https://localhost:5000/api/swagger`. All endpoints are listed and executable from the browser — no external tools needed.
+
+### Step 1 — Open Swagger
+
+Start the app and navigate to:
+
+```
+https://localhost:5000/api/swagger
+```
+
+### Step 2 — Authorize
+
+Click the **Authorize** button (lock icon, top-right of the Swagger page). You will see two authentication options:
+
+#### Option A — Bearer (API Key or PAT)
+
+Enter your API key in the `BearerAuth` field:
+
+```
+your-api-key-here
+```
+
+This is the value you set for `Api:Key` in user secrets. Alternatively you can enter a raw GitHub PAT here if you have not set up an API key.
+
+Click **Authorize**, then **Close**.
+
+#### Option B — GitHub OAuth 2.0
+
+1. Under **GitHub OAuth2**, click **Authorize**
+2. You will be redirected to GitHub's login and authorization page
+3. After you approve, GitHub redirects back to Swagger and the token is stored automatically
+4. Click **Close**
+
+> OAuth 2.0 requires `GitHub:ClientId` and `GitHub:ClientSecret` to be set. See the Configuration section above.
+
+### Step 3 — Call an endpoint
+
+1. Expand any endpoint, for example `GET /api/github/repos`
+2. Click **Try it out**
+3. Fill in the parameters (e.g. `owner = torvalds`, `type = user`)
+4. Click **Execute**
+5. The response body and status code appear below
+
+### Step 4 — Check auth status
+
+To verify which authentication method is active, expand `GET /api/auth/status` and execute it. No authorization header is needed for this endpoint.
 
 ---
 
