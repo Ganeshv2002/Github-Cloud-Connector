@@ -1,0 +1,58 @@
+### Get repositories for a user
+GET http://localhost:5000/api/github/repos?owner=torvalds&type=user
+Accept: application/json
+
+###
+
+### Get repositories for an organization
+GET http://localhost:5000/api/github/repos?owner=dotnet&type=org
+Accept: application/json
+
+###
+
+### Get issues for a repository
+GET http://localhost:5000/api/github/issues/microsoft/vscode
+Accept: application/json
+
+###
+
+### Create an issue (replace owner and repo with a repo you own)
+POST http://localhost:5000/api/github/issues
+Content-Type: application/json
+
+{
+  "owner": "your-username",
+  "repo": "your-repo",
+  "title": "Test issue from GitHub Cloud Connector",
+  "body": "This issue was created via the GitHub Cloud Connector API."
+}
+
+###
+
+### Validation error - missing title
+POST http://localhost:5000/api/github/issues
+Content-Type: application/json
+
+{
+  "owner": "your-username",
+  "repo": "your-repo",
+  "title": ""
+}
+
+###
+
+### 404 - non-existent repository
+GET http://localhost:5000/api/github/issues/this-owner-does-not-exist-xyz/no-such-repo
+Accept: application/json
+
+###
+
+### 400 - missing owner parameter
+GET http://localhost:5000/api/github/repos
+Accept: application/json
+
+###
+
+### 400 - invalid type parameter
+GET http://localhost:5000/api/github/repos?owner=torvalds&type=invalid
+Accept: application/json

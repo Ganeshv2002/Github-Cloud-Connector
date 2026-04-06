@@ -1,0 +1,11 @@
+{
+  "Version": 1,
+  "Hash": "UCgGximx7oZLvWj/nxyFjZQHris2xBRVEy37aINYhBY=",
+  "Source": "GithubCloudConnector",
+  "BasePath": "_content/GithubCloudConnector",
+  "Mode": "Default",
+  "ManifestType": "Build",
+  "ReferencedProjectsConfiguration": [],
+  "DiscoveryPatterns": [],
+  "Assets": []
+}
